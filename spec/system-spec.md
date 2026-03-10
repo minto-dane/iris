@@ -2,7 +2,7 @@
 
 ## 1. 適用範囲
 
-本仕様は Iris の CLI、libiris、generation 管理、content-address store、verification、repair、orphan management の挙動を規定する。
+本仕様は Iris の CLI、libiris core、`irisd`、generation 管理、content-address store、verification、repair、orphan management の挙動を規定する。
 
 ## 2. 規範語
 
@@ -22,6 +22,7 @@
 - `generations`
 - `tmp`
 - `log`
+- `run`
 
 ## 4. ストア仕様
 
@@ -116,6 +117,9 @@ FINALIZE:
 2. trust root は Ed25519 keyring MUST。
 3. content hash は BLAKE3 MUST。
 4. privilege-requiring operations は backend boundary で分離 SHOULD。
+5. frontend/backend 間の daemon transport は local Unix socket SHOULD。
+6. socket endpoint は owner-only permission を SHOULD 使用する。
+7. backend core は CLI の出力都合に依存してはならない SHOULD NOT。
 
 ## 12. Platform 拡張
 
