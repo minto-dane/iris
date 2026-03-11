@@ -23,6 +23,7 @@
 - `tmp`
 - `log`
 - `run`
+- `bootstrap`
 
 ## 4. ストア仕様
 
@@ -84,6 +85,19 @@ FINALIZE:
 3. rollback は直前 generation へ current を切替える SHOULD。
 4. GC は keep policy を超える古い generation を削除 MAY とする。
 5. どの generation からも参照されない store object のみ GC 対象 MUST。
+
+## 7.1 State schema と staged/bootstrap self-upgrade
+
+1. state DB schema version は SQLite `PRAGMA user_version` で MUST 追跡される。
+2. 新規 state root は schema version 1 で初期化 MUST される。
+3. implementation が未対応の schema version を検出した場合、open は fail-closed で拒否 MUST。
+4. breaking schema/state migration を要求する `iris` package update は通常 update path で自動適用してはならない MUST NOT。
+5. breaking self-upgrade の coordination state は DB 外の artifact `<state-root>/bootstrap/self-upgrade-plan.json` で保持 MUST される。
+6. bootstrap plan artifact は owner-private directory / file permission、no-follow open、temp file + atomic rename、parent directory sync を用いて hardening SHOULD される。
+7. bootstrap apply は少なくとも `staged` と `generation_activated` phase を持ち、中断後に resume できることが望ましい SHOULD。
+8. rollback boundary は phase に依存する。`staged` では current generation と DB schema は未変更でなければならない MUST。`generation_activated` では新しい `iris` generation が可視でも DB schema migration は未完了であってよい MAY。
+9. bootstrap apply 成功時、implementation は migration journal を記録し、plan artifact を削除 MUST する。
+10. 現在の開発段階では supported migration は schema 1 から schema 2 への self-upgrade path とする。
 
 ## 8. Verification
 

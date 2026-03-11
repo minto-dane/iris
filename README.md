@@ -12,9 +12,11 @@ This repository contains the current Rust implementation of Iris.
 - repository indexing for local paths and `file://` repositories
 - Ed25519 trusted-key manifest verification during `repo sync`
 - dependency-aware install / update planning
+- managed `iris self status|update` support on top of the normal generation-based update path
 - fast `verify` and full `verify --full`
 - UI-neutral request/response core API and a minimal `irisd` Unix-socket daemon
 - orphaned config preservation, `repair`, `history`, `pin`, and `why`
+- package source/provenance visibility for repository and installed metadata, including Ports-style origin metadata
 
 The long-form architecture and CLI specification live in:
 
@@ -26,7 +28,7 @@ The long-form architecture and CLI specification live in:
 
 ## Current scope
 
-The current implementation is suitable as a release-hardened core for the Iris model described in the spec. It includes a local `irisd` Unix-socket daemon that performs startup and periodic full verification, persists the latest daemon verify status under the state root, supports explicit CLI delegation while keeping the default CLI path direct and fail-closed, and rejects long-running root execution unless an explicit privilege-drop target is configured.
+The current implementation is suitable as a release-hardened core for the Iris model described in the spec. It includes a local `irisd` Unix-socket daemon that performs startup and periodic full verification, persists the latest daemon verify status under the state root, exposes read-only CLI access to persisted daemon status/log artifacts, supports explicit CLI delegation while keeping the default CLI path direct and fail-closed, and rejects long-running root execution unless an explicit privilege-drop target is configured.
 
 ## Build and test
 
@@ -36,7 +38,7 @@ The current implementation is suitable as a release-hardened core for the Iris m
 
 ## CLI overview
 
-- package ops: `install`, `remove`, `purge`, `update`, `search`, `info`
+- package ops: `install`, `remove`, `purge`, `update`, `search`, `info`, `self status|update`
 - integrity ops: `verify`, `repair`, `audit`
 - generation ops: `generation list|switch|rollback|diff|gc`
 - repository ops: `repo add <url> <trusted-key>`, `repo sync`
@@ -45,6 +47,7 @@ The current implementation is suitable as a release-hardened core for the Iris m
 - root-start hardening: `irisd --user <name|uid> [--group <name|gid>] ...`
 - daemon verification controls: `irisd --no-verify-on-start`, `irisd --verify-interval-secs <n>`
 - explicit daemon transport: `iris --transport daemon [--socket <path>] ...`
+- daemon observability: `iris daemon status`, `iris daemon log [--lines <n>]`
 
 ## Repository trust model
 
