@@ -20,7 +20,9 @@ use crate::models::{
     PackageSelfUpgrade, PackageSource, PackageState, RepairAction, RepoPackageRecord, VerifyIssue,
     VerifyReport,
 };
-use crate::repo::{sync_repositories, validate_trusted_key, verify_manifest_signature};
+use crate::repo::{
+    sync_repositories, validate_payload_snapshot, validate_trusted_key, verify_manifest_signature,
+};
 use crate::state::{IrisDb, StateLayout};
 use crate::store::ContentStore;
 
@@ -502,7 +504,6 @@ impl Iris {
                 .packages
                 .get(name)
                 .ok_or_else(|| IrisError::PackageNotFound(name.clone()))?;
-            self.stage_package_payload(&repo.manifest, Path::new(&repo.payload_root))?;
             next_packages.insert(name.clone(), repo.manifest.clone());
         }
 
@@ -521,6 +522,14 @@ impl Iris {
                     "next_package_count": next_packages.len()
                 }),
             );
+        }
+
+        for name in &plan.ordered {
+            let repo = plan
+                .packages
+                .get(name)
+                .ok_or_else(|| IrisError::PackageNotFound(name.clone()))?;
+            self.stage_package_payload(&repo.manifest, Path::new(&repo.payload_root))?;
         }
 
         let generation_id = self.activate_generation(
@@ -919,8 +928,15 @@ impl Iris {
             )));
         }
         let before = self.db.current_generation_id()?;
+        let installed_before = self.db.list_installed_packages()?;
         self.atomic_switch_current(generation_id)?;
         if let Err(err) = self.db.set_current_generation(generation_id) {
+            self.restore_current_link(before);
+            return Err(err);
+        }
+        if let Err(err) = self.reconcile_installed_state_for_generation(generation_id) {
+            let _ = self.restore_current_generation_db(before);
+            let _ = self.restore_installed_state(&installed_before);
             self.restore_current_link(before);
             return Err(err);
         }
@@ -1060,6 +1076,14 @@ impl Iris {
         options: OperationOptions,
     ) -> Result<CommandResponse> {
         let entries = self.db.list_orphans(package)?;
+        if let Some(package) = package
+            && entries.is_empty()
+        {
+            return Err(IrisError::InvalidInput(format!(
+                "package has no orphaned configuration: {}",
+                package
+            )));
+        }
         if entries.iter().any(|entry| entry.modified) && !force && !options.yes {
             return Err(IrisError::InvalidInput(
                 "modified orphaned configuration exists; re-run with --force or --yes".into(),
@@ -1416,14 +1440,9 @@ impl Iris {
     }
 
     fn stage_package_payload(&self, manifest: &PackageManifest, payload_root: &Path) -> Result<()> {
+        validate_payload_snapshot(manifest, payload_root)?;
         for file in &manifest.files {
             let source = payload_root.join(&file.path);
-            if !source.exists() {
-                return Err(IrisError::MissingPayload {
-                    package: manifest.package.name.clone(),
-                    path: source,
-                });
-            }
             self.store.import_file(&source, Some(&file.blake3))?;
         }
         Ok(())
@@ -1669,6 +1688,9 @@ impl Iris {
     fn reconcile_generation_state(&self) -> Result<()> {
         Self::remove_file_like_if_exists(&self.layout.generations_dir().join(".current-new"))?;
         self.sync_current_link_with_db()?;
+        if let Some(generation_id) = self.db.current_generation_id()? {
+            self.reconcile_installed_state_for_generation(generation_id)?;
+        }
 
         let registered: BTreeSet<_> = self
             .db
@@ -1726,6 +1748,48 @@ impl Iris {
             Some(id) => self.atomic_switch_current(id),
             None => Self::remove_file_like_if_exists(&self.layout.current_link()),
         };
+    }
+
+    fn reconcile_installed_state_for_generation(&self, generation_id: i64) -> Result<()> {
+        let desired = self.desired_installed_state_for_generation(generation_id)?;
+        self.db.replace_installed_packages(&desired)
+    }
+
+    fn desired_installed_state_for_generation(
+        &self,
+        generation_id: i64,
+    ) -> Result<Vec<InstalledPackageRecord>> {
+        let active_packages = self.db.generation_packages(generation_id)?;
+        let mut desired: Vec<_> = active_packages
+            .values()
+            .cloned()
+            .map(|manifest| InstalledPackageRecord {
+                state: PackageState::Installed,
+                generation_id: Some(generation_id),
+                manifest,
+            })
+            .collect();
+        desired.extend(
+            self.db
+                .list_installed_packages()?
+                .into_iter()
+                .filter(|record| {
+                    record.state == PackageState::OrphanedConfig
+                        && !active_packages.contains_key(&record.manifest.package.name)
+                }),
+        );
+        Ok(desired)
+    }
+
+    fn restore_installed_state(&self, snapshot: &[InstalledPackageRecord]) -> Result<()> {
+        self.db.replace_installed_packages(snapshot)
+    }
+
+    fn restore_current_generation_db(&self, generation_id: Option<i64>) -> Result<()> {
+        match generation_id {
+            Some(id) => self.db.set_current_generation(id),
+            None => self.db.clear_current_generation(),
+        }
     }
 
     fn remove_file_like_if_exists(path: &Path) -> Result<()> {
@@ -1796,7 +1860,7 @@ impl Iris {
                             ));
                             continue;
                         }
-                        let expected = self.store.object_path(&file.blake3);
+                        let expected = self.store.object_path(&file.blake3)?;
                         let link = fs::read_link(&target)?;
                         if link != expected {
                             report.issues.push(issue(
@@ -1872,7 +1936,7 @@ impl Iris {
         match file.file_type {
             FileType::Binary | FileType::Data => {
                 if !self.store.object_exists(&file.blake3) {
-                    let repo = self.db.latest_repo_package(&manifest.package.name)?;
+                    let repo = self.db.repo_package_for_manifest(manifest)?;
                     if let Some(repo) = repo {
                         let source = Path::new(&repo.payload_root).join(&file.path);
                         self.store.import_file(&source, Some(&file.blake3))?;
@@ -1894,6 +1958,11 @@ impl Iris {
                 for file in manifest.files {
                     hashes.insert(file.blake3);
                 }
+            }
+        }
+        if let Some(plan) = self.read_self_upgrade_plan()? {
+            for file in plan.package.files {
+                hashes.insert(file.blake3);
             }
         }
         for orphan in self.db.list_orphans(None)? {

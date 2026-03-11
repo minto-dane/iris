@@ -171,6 +171,40 @@ fn write_hello_repo(repo_root: &Path, key: &SigningKey) -> Result<()> {
     )
 }
 
+fn write_hello_package(
+    repo_root: &Path,
+    key: &SigningKey,
+    version: &str,
+    body: &[u8],
+) -> Result<()> {
+    let config_bytes = b"greeting = \"hello\"\n";
+    let manifest = package_manifest(
+        "hello",
+        version,
+        "hello test package",
+        vec![],
+        vec![
+            file_entry("usr/bin/hello", body, "0755", FileType::Binary, None),
+            file_entry(
+                "etc/hello.conf",
+                config_bytes,
+                "0644",
+                FileType::Config,
+                Some(MergeStrategy::ThreeWay),
+            ),
+        ],
+    );
+    write_signed_package(
+        repo_root,
+        key,
+        manifest,
+        &[
+            ("usr/bin/hello", body),
+            ("etc/hello.conf", config_bytes.as_slice()),
+        ],
+    )
+}
+
 fn write_dependency_repo(repo_root: &Path, key: &SigningKey) -> Result<()> {
     let library_bytes = b"shared library payload\n";
     let app_bytes = b"#!/bin/sh\necho app\n";
@@ -553,6 +587,65 @@ fn self_update_updates_managed_iris_package() -> Result<()> {
 }
 
 #[test]
+fn repo_queries_and_update_use_semantic_version_ordering() -> Result<()> {
+    let state_dir = tempdir()?;
+    let repo_dir = tempdir()?;
+    let key = signing_key(35);
+    let trusted = trusted_key(&key);
+    write_hello_package(
+        repo_dir.path(),
+        &key,
+        "1.9.0",
+        b"#!/bin/sh\necho hello v1.9.0\n",
+    )?;
+
+    let app = Iris::open(state_dir.path())?;
+    app.repo_add(repo_dir.path().to_str().expect("utf8 path"), &trusted)?;
+    app.repo_sync()?;
+    app.install(&["hello".to_string()], options())?;
+
+    write_hello_package(
+        repo_dir.path(),
+        &key,
+        "1.10.0",
+        b"#!/bin/sh\necho hello v1.10.0\n",
+    )?;
+    app.repo_sync()?;
+
+    let latest = app
+        .db
+        .latest_repo_package("hello")?
+        .expect("latest repo package should exist");
+    assert_eq!(latest.manifest.package.version, "1.10.0");
+
+    let candidates = app.db.repo_packages_for_name("hello")?;
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0].manifest.package.version, "1.10.0");
+    assert_eq!(candidates[1].manifest.package.version, "1.9.0");
+
+    let info = app.info("hello")?;
+    assert_eq!(info.data["repository"]["version"].as_str(), Some("1.10.0"));
+
+    let search = app.search("hello")?;
+    let matches = search
+        .data
+        .as_array()
+        .expect("search data should be an array");
+    assert_eq!(
+        matches[0]["manifest"]["package"]["version"].as_str(),
+        Some("1.10.0")
+    );
+
+    app.update(&["hello".to_string()], options())?;
+    let installed = app
+        .db
+        .installed_package("hello")?
+        .expect("hello should remain installed");
+    assert_eq!(installed.manifest.package.version, "1.10.0");
+    Ok(())
+}
+
+#[test]
 fn self_update_requires_managed_iris_package() -> Result<()> {
     let state_dir = tempdir()?;
     let app = Iris::open(state_dir.path())?;
@@ -670,6 +763,15 @@ fn staged_bootstrap_self_upgrade_updates_generation_and_schema() -> Result<()> {
 
     let plan_path = state_dir.path().join("bootstrap/self-upgrade-plan.json");
     assert!(plan_path.exists());
+    let staged_hash = ContentStore::hash_bytes(b"#!/bin/sh\necho iris 2.0.0\n");
+    let staged_object = app.store.object_path(&staged_hash)?;
+    assert!(staged_object.exists());
+
+    app.generation_gc()?;
+    assert!(
+        staged_object.exists(),
+        "generation GC must retain staged bootstrap payload objects"
+    );
 
     let staged_status = app.execute(IrisRequest::SelfStatus)?;
     assert_eq!(
@@ -865,7 +967,7 @@ fn daemon_status_rejects_symlinked_artifact() -> Result<()> {
 }
 
 #[test]
-fn daemon_status_normalizes_sensitive_parent_permissions_before_read() -> Result<()> {
+fn daemon_status_rejects_overly_broad_sensitive_parent_permissions() -> Result<()> {
     let state_dir = tempdir()?;
     let run_dir = state_dir.path().join("run");
     fs::create_dir_all(&run_dir)?;
@@ -875,11 +977,17 @@ fn daemon_status_normalizes_sensitive_parent_permissions_before_read() -> Result
     fs::set_permissions(&status_path, fs::Permissions::from_mode(0o600))?;
 
     let app = Iris::open(state_dir.path())?;
-    let response = app.execute(IrisRequest::DaemonStatus)?;
+    let err = app
+        .execute(IrisRequest::DaemonStatus)
+        .expect_err("overly broad daemon status parent permissions should fail closed");
     let mode = fs::metadata(&run_dir)?.permissions().mode() & 0o777;
 
-    assert!(response.ok);
-    assert_eq!(mode, 0o700);
+    assert_eq!(mode, 0o755);
+    assert!(matches!(
+        err,
+        IrisError::InvalidInput(message)
+            if message.contains("overly broad directory permissions")
+    ));
     Ok(())
 }
 
@@ -1612,6 +1720,107 @@ fn install_resolves_dependencies_and_blocks_required_removal() -> Result<()> {
 }
 
 #[test]
+fn install_dry_run_does_not_stage_store_objects() -> Result<()> {
+    let state_dir = tempdir()?;
+    let repo_dir = tempdir()?;
+    let key = signing_key(14);
+    let trusted = trusted_key(&key);
+    write_hello_repo(repo_dir.path(), &key)?;
+
+    let app = Iris::open(state_dir.path())?;
+    app.repo_add(repo_dir.path().to_str().expect("utf8 path"), &trusted)?;
+    app.repo_sync()?;
+
+    let response = app.install(
+        &["hello".to_string()],
+        OperationOptions {
+            dry_run: true,
+            yes: false,
+        },
+    )?;
+
+    assert!(response.ok);
+    assert_eq!(app.db.current_generation_id()?, None);
+    assert!(app.db.installed_package("hello")?.is_none());
+    assert!(fs::read_dir(app.layout.store_dir())?.next().is_none());
+    Ok(())
+}
+
+#[test]
+fn generation_switch_and_rollback_reconcile_installed_state() -> Result<()> {
+    let state_dir = tempdir()?;
+    let repo_dir = tempdir()?;
+    let key = signing_key(15);
+    let trusted = trusted_key(&key);
+    write_hello_package(
+        repo_dir.path(),
+        &key,
+        "1.0.0",
+        b"#!/bin/sh\necho hello v1\n",
+    )?;
+
+    let app = Iris::open(state_dir.path())?;
+    app.repo_add(repo_dir.path().to_str().expect("utf8 path"), &trusted)?;
+    app.repo_sync()?;
+    app.install(&["hello".to_string()], options())?;
+
+    let generation_v1 = app
+        .db
+        .current_generation_id()?
+        .expect("generation after initial install");
+    assert_eq!(
+        app.db
+            .installed_package("hello")?
+            .expect("hello installed")
+            .manifest
+            .package
+            .version,
+        "1.0.0"
+    );
+
+    write_hello_package(
+        repo_dir.path(),
+        &key,
+        "2.0.0",
+        b"#!/bin/sh\necho hello v2\n",
+    )?;
+    app.repo_sync()?;
+    app.update(&["hello".to_string()], options())?;
+
+    let generation_v2 = app
+        .db
+        .current_generation_id()?
+        .expect("generation after update");
+    assert!(generation_v2 > generation_v1);
+    assert_eq!(
+        app.db
+            .installed_package("hello")?
+            .expect("hello installed after update")
+            .manifest
+            .package
+            .version,
+        "2.0.0"
+    );
+
+    app.generation_rollback()?;
+    let rolled_back = app
+        .db
+        .installed_package("hello")?
+        .expect("hello installed after rollback");
+    assert_eq!(rolled_back.manifest.package.version, "1.0.0");
+    assert_eq!(rolled_back.generation_id, Some(generation_v1));
+
+    app.generation_switch(generation_v2)?;
+    let switched = app
+        .db
+        .installed_package("hello")?
+        .expect("hello installed after switch");
+    assert_eq!(switched.manifest.package.version, "2.0.0");
+    assert_eq!(switched.generation_id, Some(generation_v2));
+    Ok(())
+}
+
+#[test]
 fn repo_sync_rejects_untrusted_signatures() -> Result<()> {
     let state_dir = tempdir()?;
     let repo_dir = tempdir()?;
@@ -1631,6 +1840,31 @@ fn repo_sync_rejects_untrusted_signatures() -> Result<()> {
     assert!(matches!(
         err,
         IrisError::SignatureVerification(message) if message.contains("untrusted key")
+    ));
+    Ok(())
+}
+
+#[test]
+fn repo_sync_rejects_missing_payload_files() -> Result<()> {
+    let state_dir = tempdir()?;
+    let repo_dir = tempdir()?;
+    let key = signing_key(36);
+    let trusted = trusted_key(&key);
+    write_hello_repo(repo_dir.path(), &key)?;
+
+    let missing_payload = repo_dir.path().join("payload/hello-1.0.0/usr/bin/hello");
+    fs::remove_file(&missing_payload)?;
+
+    let app = Iris::open(state_dir.path())?;
+    app.repo_add(repo_dir.path().to_str().expect("utf8 path"), &trusted)?;
+
+    let err = app
+        .repo_sync()
+        .expect_err("repo sync should reject missing payload files");
+    assert!(matches!(
+        err,
+        IrisError::MissingPayload { package, path }
+            if package == "hello" && path == missing_payload
     ));
     Ok(())
 }
@@ -1658,6 +1892,88 @@ fn repo_sync_keeps_previous_index_when_replacement_fails() -> Result<()> {
     let indexed = app.db.repo_packages_for_name("hello")?;
     assert_eq!(indexed.len(), 1);
     assert_eq!(indexed[0].manifest.package.version, "1.0.0");
+    Ok(())
+}
+
+#[test]
+fn install_rejects_symlinked_repo_payload_entries_after_sync() -> Result<()> {
+    let state_dir = tempdir()?;
+    let repo_dir = tempdir()?;
+    let key = signing_key(37);
+    let trusted = trusted_key(&key);
+    write_hello_repo(repo_dir.path(), &key)?;
+
+    let app = Iris::open(state_dir.path())?;
+    app.repo_add(repo_dir.path().to_str().expect("utf8 path"), &trusted)?;
+    app.repo_sync()?;
+
+    let payload_file = repo_dir.path().join("payload/hello-1.0.0/usr/bin/hello");
+    let payload_target = repo_dir.path().join("payload/symlink-target");
+    fs::write(&payload_target, b"#!/bin/sh\necho hijacked\n")?;
+    fs::remove_file(&payload_file)?;
+    symlink(&payload_target, &payload_file)?;
+
+    let err = app
+        .install(&["hello".to_string()], options())
+        .expect_err("install should reject symlinked repository payload entries");
+    assert!(matches!(
+        err,
+        IrisError::InvalidInput(message)
+            if message.contains("symlinked repository payload entry")
+    ));
+    Ok(())
+}
+
+#[test]
+fn repair_uses_exact_repository_snapshot() -> Result<()> {
+    let state_dir = tempdir()?;
+    let repo_dir = tempdir()?;
+    let key = signing_key(38);
+    let trusted = trusted_key(&key);
+    let version_one = b"#!/bin/sh\necho hello v1\n";
+    let version_two = b"#!/bin/sh\necho hello v2\n";
+    write_hello_package(repo_dir.path(), &key, "1.0.0", version_one)?;
+
+    let app = Iris::open(state_dir.path())?;
+    app.repo_add(repo_dir.path().to_str().expect("utf8 path"), &trusted)?;
+    app.repo_sync()?;
+    app.install(&["hello".to_string()], options())?;
+
+    let installed = app
+        .db
+        .installed_package("hello")?
+        .expect("hello should be installed");
+    let binary = installed
+        .manifest
+        .files
+        .iter()
+        .find(|file| file.path == "usr/bin/hello")
+        .expect("hello binary entry should exist");
+    let object_path = app.store.object_path(&binary.blake3)?;
+    fs::remove_file(&object_path)?;
+    assert!(!object_path.exists());
+
+    write_hello_package(repo_dir.path(), &key, "2.0.0", version_two)?;
+    app.repo_sync()?;
+
+    app.repair(&["hello".to_string()], options())?;
+    assert_eq!(fs::read(&object_path)?, version_one);
+    Ok(())
+}
+
+#[test]
+fn orphan_purge_rejects_missing_package_target() -> Result<()> {
+    let state_dir = tempdir()?;
+    let app = Iris::open(state_dir.path())?;
+
+    let err = app
+        .orphan_purge(Some("hello"), false, options())
+        .expect_err("orphan purge should fail when the requested package has no orphan entries");
+    assert!(matches!(
+        err,
+        IrisError::InvalidInput(message)
+            if message.contains("package has no orphaned configuration: hello")
+    ));
     Ok(())
 }
 

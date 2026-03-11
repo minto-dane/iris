@@ -35,7 +35,7 @@
 ### package.self_upgrade
 
 - この table は `iris` の staged/bootstrap self-upgrade coordination 用 metadata として予約される。
-- non-self package はこの table に依存すべきではない SHOULD NOT。
+- non-self package はこの table を宣言してはならない MUST NOT。
 
 fields:
 
@@ -45,10 +45,10 @@ fields:
 
 規則:
 
-1. `bootstrap = true` の場合、`from_state_schema` と `target_state_schema` は必須として扱われる MUST。
+1. `bootstrap = true` の場合、`from_state_schema` と `target_state_schema` を両方含まなければならない MUST。
 2. `bootstrap = true` の場合、`target_state_schema > from_state_schema` でなければならない MUST。
 3. `bootstrap = true` の `iris` package は通常の `iris self update` / `iris update iris` で自動適用されてはならない MUST NOT。
-4. stage/bootstrap flow は `from_state_schema` が現在 state schema と一致する場合にのみ適用してよい MAY。
+4. staged/bootstrap flow を開始してよいのは `from_state_schema` が現在 state schema と一致する場合に限る MUST。schema mismatch は fail-closed で拒否しなければならない MUST。
 
 ## 3. signature table
 

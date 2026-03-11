@@ -1,4 +1,5 @@
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -55,6 +56,7 @@ pub fn sync_repositories(layout: &StateLayout, db: &IrisDb) -> Result<Vec<RepoSy
             } else {
                 candidate_b
             };
+            validate_payload_snapshot(&manifest, &root)?;
             indexed.push((manifest, entry.path().to_path_buf(), root));
         }
 
@@ -67,6 +69,69 @@ pub fn sync_repositories(layout: &StateLayout, db: &IrisDb) -> Result<Vec<RepoSy
     }
 
     Ok(summaries)
+}
+
+pub(crate) fn validate_payload_snapshot(
+    manifest: &PackageManifest,
+    payload_root: &Path,
+) -> Result<()> {
+    let root_metadata = match fs::symlink_metadata(payload_root) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(IrisError::InvalidInput(format!(
+                "repository payload root missing for package {}: {}",
+                manifest.package.name,
+                payload_root.display()
+            )));
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    if root_metadata.file_type().is_symlink() {
+        return Err(IrisError::InvalidInput(format!(
+            "refusing to use symlinked repository payload root for package {}: {}",
+            manifest.package.name,
+            payload_root.display()
+        )));
+    }
+    if !root_metadata.is_dir() {
+        return Err(IrisError::InvalidInput(format!(
+            "repository payload root is not a directory for package {}: {}",
+            manifest.package.name,
+            payload_root.display()
+        )));
+    }
+
+    for file in &manifest.files {
+        let source = payload_root.join(&file.path);
+        let metadata = match fs::symlink_metadata(&source) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Err(IrisError::MissingPayload {
+                    package: manifest.package.name.clone(),
+                    path: source,
+                });
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+        if metadata.file_type().is_symlink() {
+            return Err(IrisError::InvalidInput(format!(
+                "refusing to use symlinked repository payload entry for package {}: {}",
+                manifest.package.name,
+                source.display()
+            )));
+        }
+        if !metadata.is_file() {
+            return Err(IrisError::InvalidInput(format!(
+                "repository payload entry is not a regular file for package {}: {}",
+                manifest.package.name,
+                source.display()
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 pub fn validate_trusted_key(key: &str) -> Result<()> {

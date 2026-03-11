@@ -28,6 +28,8 @@ impl PackageManifest {
                 "package.version is required".into(),
             ));
         }
+        validate_package_id_component(&self.package.name, "package.name", false)?;
+        validate_package_id_component(&self.package.version, "package.version", true)?;
         if self.signature.algorithm.trim().is_empty()
             || self.signature.public_key.trim().is_empty()
             || self.signature.value.trim().is_empty()
@@ -94,6 +96,40 @@ impl PackageManifest {
             .map(|entry| (entry.path.as_str(), entry))
             .collect()
     }
+}
+
+fn validate_package_id_component(value: &str, field: &str, allow_comma: bool) -> Result<()> {
+    if value.trim() != value {
+        return Err(IrisError::InvalidManifest(format!(
+            "{field} must not contain leading or trailing whitespace"
+        )));
+    }
+    if value == "." || value == ".." {
+        return Err(IrisError::InvalidManifest(format!(
+            "{field} must not be . or .."
+        )));
+    }
+    if value.contains(['/', '\\', '\0']) || value.contains("..") {
+        return Err(IrisError::InvalidManifest(format!(
+            "{field} contains invalid path characters"
+        )));
+    }
+    if value.chars().any(char::is_whitespace) {
+        return Err(IrisError::InvalidManifest(format!(
+            "{field} must not contain whitespace"
+        )));
+    }
+    let valid = value.chars().all(|ch| {
+        ch.is_ascii_alphanumeric()
+            || matches!(ch, '.' | '_' | '+' | '-')
+            || (allow_comma && ch == ',')
+    });
+    if !valid {
+        return Err(IrisError::InvalidManifest(format!(
+            "{field} contains unsupported characters"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -395,4 +431,59 @@ pub struct AuditReport {
     pub orphaned_configs: usize,
     pub verify: VerifyReport,
     pub findings: Vec<AuditFinding>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest(name: &str, version: &str) -> PackageManifest {
+        PackageManifest {
+            package: PackageMetadata {
+                name: name.into(),
+                version: version.into(),
+                revision: 0,
+                arch: "amd64".into(),
+                abi: "freebsd:14:*".into(),
+                summary: "test package".into(),
+                maintainer: "test@example.invalid".into(),
+                source: None,
+                self_upgrade: None,
+            },
+            signature: Signature {
+                algorithm: "ed25519".into(),
+                public_key: "pk".into(),
+                value: "sig".into(),
+            },
+            dependencies: Dependencies::default(),
+            files: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_path_like_package_name() {
+        let err = manifest("../hello", "1.0.0")
+            .validate()
+            .expect_err("path-like package name must be rejected");
+        assert!(
+            matches!(err, IrisError::InvalidManifest(message) if message.contains("package.name"))
+        );
+    }
+
+    #[test]
+    fn validate_rejects_whitespace_in_version() {
+        let err = manifest("hello", "1.0.0 rc1")
+            .validate()
+            .expect_err("whitespace in version must be rejected");
+        assert!(
+            matches!(err, IrisError::InvalidManifest(message) if message.contains("package.version"))
+        );
+    }
+
+    #[test]
+    fn validate_accepts_pkg_style_version_components() {
+        manifest("hello-tools", "1.2.3_4,1")
+            .validate()
+            .expect("pkg-style version should remain valid");
+    }
 }
