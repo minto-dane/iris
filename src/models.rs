@@ -18,18 +18,8 @@ pub struct PackageManifest {
 
 impl PackageManifest {
     pub fn validate(&self) -> Result<()> {
-        if self.package.name.trim().is_empty() {
-            return Err(IrisError::InvalidManifest(
-                "package.name is required".into(),
-            ));
-        }
-        if self.package.version.trim().is_empty() {
-            return Err(IrisError::InvalidManifest(
-                "package.version is required".into(),
-            ));
-        }
-        validate_package_id_component(&self.package.name, "package.name", false)?;
-        validate_package_id_component(&self.package.version, "package.version", true)?;
+        validate_package_name(&self.package.name)?;
+        validate_package_version(&self.package.version)?;
         if self.signature.algorithm.trim().is_empty()
             || self.signature.public_key.trim().is_empty()
             || self.signature.value.trim().is_empty()
@@ -98,35 +88,64 @@ impl PackageManifest {
     }
 }
 
-fn validate_package_id_component(value: &str, field: &str, allow_comma: bool) -> Result<()> {
-    if value.trim() != value {
-        return Err(IrisError::InvalidManifest(format!(
-            "{field} must not contain leading or trailing whitespace"
+fn validate_package_name(value: &str) -> Result<()> {
+    validate_package_field(
+        value,
+        "package.name",
+        true,
+        |ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'),
+        "ASCII alphanumeric characters, '-' and '_'",
+    )
+}
+
+fn validate_package_version(value: &str) -> Result<()> {
+    validate_package_field(
+        value,
+        "package.version",
+        false,
+        |ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '+'),
+        "ASCII alphanumeric characters, '.', '-' and '+'",
+    )
+}
+
+fn validate_package_field<F>(
+    value: &str,
+    field: &str,
+    reject_dotdot: bool,
+    allowed: F,
+    allowed_description: &str,
+) -> Result<()>
+where
+    F: Fn(char) -> bool,
+{
+    if value.is_empty() {
+        return Err(IrisError::InvalidInput(format!(
+            "{field} must not be empty"
         )));
     }
-    if value == "." || value == ".." {
-        return Err(IrisError::InvalidManifest(format!(
-            "{field} must not be . or .."
+    if reject_dotdot && value.contains("..") {
+        return Err(IrisError::InvalidInput(format!(
+            "{field} must not contain path traversal sequence '..'"
         )));
     }
-    if value.contains(['/', '\\', '\0']) || value.contains("..") {
-        return Err(IrisError::InvalidManifest(format!(
-            "{field} contains invalid path characters"
+    if value.chars().any(|ch| matches!(ch, '/' | '\\')) {
+        return Err(IrisError::InvalidInput(format!(
+            "{field} must not contain path separators"
         )));
     }
     if value.chars().any(char::is_whitespace) {
-        return Err(IrisError::InvalidManifest(format!(
+        return Err(IrisError::InvalidInput(format!(
             "{field} must not contain whitespace"
         )));
     }
-    let valid = value.chars().all(|ch| {
-        ch.is_ascii_alphanumeric()
-            || matches!(ch, '.' | '_' | '+' | '-')
-            || (allow_comma && ch == ',')
-    });
-    if !valid {
-        return Err(IrisError::InvalidManifest(format!(
-            "{field} contains unsupported characters"
+    if value.chars().any(char::is_control) {
+        return Err(IrisError::InvalidInput(format!(
+            "{field} must not contain control characters"
+        )));
+    }
+    if value.chars().any(|ch| !allowed(ch)) {
+        return Err(IrisError::InvalidInput(format!(
+            "{field} must contain only {allowed_description}"
         )));
     }
     Ok(())
@@ -460,30 +479,73 @@ mod tests {
         }
     }
 
-    #[test]
-    fn validate_rejects_path_like_package_name() {
-        let err = manifest("../hello", "1.0.0")
+    fn assert_invalid_input(name: &str, version: &str, field: &str, reason: &str) {
+        let err = manifest(name, version)
             .validate()
-            .expect_err("path-like package name must be rejected");
+            .expect_err("manifest should be rejected");
         assert!(
-            matches!(err, IrisError::InvalidManifest(message) if message.contains("package.name"))
+            matches!(err, IrisError::InvalidInput(ref message) if message.contains(field) && message.contains(reason)),
+            "unexpected error: {err:?}"
         );
     }
 
     #[test]
-    fn validate_rejects_whitespace_in_version() {
-        let err = manifest("hello", "1.0.0 rc1")
+    fn validate_accepts_strict_name_and_version_boundaries() {
+        manifest("-hello_tools-", "1.2.3-beta+meta")
             .validate()
-            .expect_err("whitespace in version must be rejected");
-        assert!(
-            matches!(err, IrisError::InvalidManifest(message) if message.contains("package.version"))
+            .expect("strictly valid package identifiers should pass");
+    }
+
+    #[test]
+    fn validate_rejects_empty_name_and_version() {
+        assert_invalid_input("", "1.0.0", "package.name", "empty");
+        assert_invalid_input("hello", "", "package.version", "empty");
+    }
+
+    #[test]
+    fn validate_rejects_path_separators_and_traversal_in_name() {
+        assert_invalid_input("hello/world", "1.0.0", "package.name", "path separators");
+        assert_invalid_input(r"hello\world", "1.0.0", "package.name", "path separators");
+        assert_invalid_input("../hello", "1.0.0", "package.name", "path traversal");
+    }
+
+    #[test]
+    fn validate_rejects_whitespace_control_and_invalid_characters_in_name() {
+        assert_invalid_input("hello world", "1.0.0", "package.name", "whitespace");
+        assert_invalid_input(
+            "hello\u{7f}world",
+            "1.0.0",
+            "package.name",
+            "control characters",
+        );
+        assert_invalid_input(
+            "hello.name",
+            "1.0.0",
+            "package.name",
+            "only ASCII alphanumeric",
         );
     }
 
     #[test]
-    fn validate_accepts_pkg_style_version_components() {
-        manifest("hello-tools", "1.2.3_4,1")
-            .validate()
-            .expect("pkg-style version should remain valid");
+    fn validate_rejects_path_separators_in_version() {
+        assert_invalid_input("hello", "1/2/3", "package.version", "path separators");
+        assert_invalid_input("hello", r"1\2\3", "package.version", "path separators");
+    }
+
+    #[test]
+    fn validate_rejects_whitespace_control_and_invalid_characters_in_version() {
+        assert_invalid_input("hello", "1.0.0 rc1", "package.version", "whitespace");
+        assert_invalid_input(
+            "hello",
+            "1.0.0\u{7f}",
+            "package.version",
+            "control characters",
+        );
+        assert_invalid_input(
+            "hello",
+            "1.2.3_4,1",
+            "package.version",
+            "only ASCII alphanumeric",
+        );
     }
 }
