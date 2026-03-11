@@ -26,6 +26,30 @@
 - `origin: string`
 - `options: array<string>`
 
+`package.source` は package provenance を表す。
+
+- `type = "port"` は FreeBSD Ports 由来であることを示し、Iris core が ports build pipeline を実行することを意味しない。
+- `origin` は可能なら canonical な origin (例: `ports-mgmt/iris`) を保持する SHOULD。
+- `options` は Ports build options や source-side build metadata を保持してよい MAY。
+
+### package.self_upgrade
+
+- この table は `iris` の staged/bootstrap self-upgrade coordination 用 metadata として予約される。
+- non-self package はこの table に依存すべきではない SHOULD NOT。
+
+fields:
+
+- `bootstrap: boolean`
+- `from_state_schema: integer`
+- `target_state_schema: integer`
+
+規則:
+
+1. `bootstrap = true` の場合、`from_state_schema` と `target_state_schema` は必須として扱われる MUST。
+2. `bootstrap = true` の場合、`target_state_schema > from_state_schema` でなければならない MUST。
+3. `bootstrap = true` の `iris` package は通常の `iris self update` / `iris update iris` で自動適用されてはならない MUST NOT。
+4. stage/bootstrap flow は `from_state_schema` が現在 state schema と一致する場合にのみ適用してよい MAY。
+
 ## 3. signature table
 
 必須:

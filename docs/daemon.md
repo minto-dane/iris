@@ -17,11 +17,11 @@
    - structured response encode
 3. frontends
    - `iris` CLI
-   - 将来の local frontend
+   - 任意の local frontend
 
-## 初期スコープ
+## 現在の提供範囲
 
-初期 `irisd` は以下を提供する。
+現行の `irisd` は以下を提供する。
 
 - local Unix domain socket
 - JSON request / response
@@ -32,11 +32,13 @@
 - 起動時 full verify
 - 周期 full verify
 - 直近 verify 状態の status file 保存
+- persisted status / verify log の read-only 読み出し
 
 ## セキュリティ方針
 
 - socket は state root 配下の `run/irisd.sock` に配置する
 - `run` directory は owner-only を前提とする
+- `log` / `tmp` directory も owner-only を前提とし、state layout 作成時点から private permission に正規化する
 - `run/irisd.lock` には advisory lock を取り、kernel が保持する lock により single-instance を強制する
 - lock file は残存しうるが、ファイル存在そのものではなく lock 保持の有無で live daemon を判定する
 - 既存 socket の再利用はせず、stale socket のみを安全に unlink する
@@ -89,8 +91,20 @@
 - `<state-root>/run/daemon-status.json`: 直近 verify の要約と詳細
 - `<state-root>/log/daemon-verify.jsonl`: verify 実行ごとの append-only 履歴
 
-status は temp file → sync → rename → parent dir sync の順で更新する。
-log は append 後に flush / sync し、書き込み失敗を黙殺しない。
+status は **同一 directory 内の一意 temp file** を `create_new` / no-follow 相当で作ってから、
+write → sync → rename → parent dir sync の順で更新する。
+
+`run` / `log` / `tmp` directory 自体も、artifact hardening の前提として
+owner-private permission に維持される。
+
+既存 status / temp path が symlink・non-file・unexpected owner・unsafe permission の場合は
+**fail-closed** で更新を拒否する。
+
+log は no-follow 相当で open し、open 後も file type / owner / permission を検証する。
+append 後は flush / sync / parent dir sync を行い、書き込み失敗を黙殺しない。
+
+また verify log は implementation-defined な保持上限を持ち、上限超過時は
+**古い entry を削減して最近の履歴を優先保持**する。
 
 status には最低限、以下が入る。
 
@@ -101,6 +115,17 @@ status には最低限、以下が入る。
 - issue count
 - verify report または error
 
+## observability access
+
+- `iris daemon status` は persisted status file を読む
+- `iris daemon log` は persisted verify log の末尾側を読む
+- どちらも daemon の自動起動や transport fallback を伴わない
+- `--transport daemon` を使う場合も意味論は同一で、単に request 経路だけが変わる
+- log 読み出しは件数と bytes を bounded に扱い、巨大ログの丸ごと返却はしない
+- status / log 読み出しは symlink を追従せず、可能な限り no-follow open と open 後 metadata 検証で扱う
+- parent directory / opened file の owner / permission / file type が信頼できない場合は fail-closed で拒否する
+- status / log が未生成の環境では、「まだ記録がない」ことを成功応答として返す
+
 ## 運用設定
 
 - `irisd --root <path>`: state root 指定
@@ -110,7 +135,7 @@ status には最低限、以下が入る。
 - `irisd --user <name|uid>`: root 起動時の privilege drop target
 - `irisd --group <name|gid>`: root 起動時の group override
 
-## 今後の拡張
+## 拡張余地
 
 - job queue
 - progress event stream
