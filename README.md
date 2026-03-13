@@ -28,7 +28,7 @@ The long-form architecture and CLI specification live in:
 
 ## Current scope
 
-The current implementation is suitable as a release-hardened core for the Iris model described in the spec. It includes a local `irisd` Unix-socket daemon that performs startup and periodic full verification, persists the latest daemon verify status under the state root, exposes read-only CLI access to persisted daemon status/log artifacts, supports explicit CLI delegation while keeping the default CLI path direct and fail-closed, and rejects long-running root execution unless an explicit privilege-drop target is configured.
+The current implementation is suitable as a release-hardened core for the Iris model described in the spec. It includes a local `irisd` Unix-socket daemon that performs startup and periodic full verification, persists the latest daemon verify status under the state root, exposes read-only, fail-closed CLI access to persisted daemon status/log artifacts, supports explicit CLI delegation while keeping the default CLI path direct and fail-closed, and rejects long-running root execution unless an explicit privilege-drop target is configured.
 
 ## Build and test
 

@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::fs;
@@ -5,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 
 use crate::error::{IrisError, Result};
 use crate::models::{
@@ -127,6 +128,7 @@ impl StateLayout {
 }
 
 fn ensure_directory(path: &Path, mode: Option<u32>) -> Result<()> {
+    let mut created = false;
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() {
@@ -144,11 +146,12 @@ fn ensure_directory(path: &Path, mode: Option<u32>) -> Result<()> {
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             fs::create_dir_all(path)?;
+            created = true;
         }
         Err(err) => return Err(err.into()),
     }
 
-    if let Some(mode) = mode {
+    if created && let Some(mode) = mode {
         fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
     }
 
@@ -402,55 +405,16 @@ impl IrisDb {
             "SELECT source_url, manifest_path, payload_root, manifest_toml
              FROM repo_packages
              WHERE name LIKE ?1 OR summary LIKE ?1
-             ORDER BY name, version DESC, revision DESC",
+             ORDER BY name ASC",
         )?;
-        let rows = stmt.query_map(params![needle], |row| {
-            let manifest_toml: String = row.get(3)?;
-            let manifest: PackageManifest = toml::from_str(&manifest_toml).map_err(|err| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    3,
-                    rusqlite::types::Type::Text,
-                    Box::new(err),
-                )
-            })?;
-            Ok(RepoPackageRecord {
-                source_url: row.get(0)?,
-                manifest_path: row.get(1)?,
-                payload_root: row.get(2)?,
-                manifest,
-            })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        let rows = stmt.query_map(params![needle], Self::repo_package_from_row)?;
+        let mut packages = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        sort_repo_package_records(&mut packages);
+        Ok(packages)
     }
 
     pub fn latest_repo_package(&self, name: &str) -> Result<Option<RepoPackageRecord>> {
-        let conn = self.connect()?;
-        let mut stmt = conn.prepare(
-            "SELECT source_url, manifest_path, payload_root, manifest_toml
-             FROM repo_packages
-             WHERE name = ?1
-             ORDER BY version DESC, revision DESC
-             LIMIT 1",
-        )?;
-        stmt.query_row(params![name], |row| {
-            let manifest_toml: String = row.get(3)?;
-            let manifest: PackageManifest = toml::from_str(&manifest_toml).map_err(|err| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    3,
-                    rusqlite::types::Type::Text,
-                    Box::new(err),
-                )
-            })?;
-            Ok(RepoPackageRecord {
-                source_url: row.get(0)?,
-                manifest_path: row.get(1)?,
-                payload_root: row.get(2)?,
-                manifest,
-            })
-        })
-        .optional()
-        .map_err(Into::into)
+        Ok(self.repo_packages_for_name(name)?.into_iter().next())
     }
 
     pub fn repo_packages_for_name(&self, name: &str) -> Result<Vec<RepoPackageRecord>> {
@@ -458,27 +422,50 @@ impl IrisDb {
         let mut stmt = conn.prepare(
             "SELECT source_url, manifest_path, payload_root, manifest_toml
              FROM repo_packages
-             WHERE name = ?1
-             ORDER BY version DESC, revision DESC",
+             WHERE name = ?1",
         )?;
-        let rows = stmt.query_map(params![name], |row| {
-            let manifest_toml: String = row.get(3)?;
-            let manifest: PackageManifest = toml::from_str(&manifest_toml).map_err(|err| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    3,
-                    rusqlite::types::Type::Text,
-                    Box::new(err),
-                )
-            })?;
-            Ok(RepoPackageRecord {
-                source_url: row.get(0)?,
-                manifest_path: row.get(1)?,
-                payload_root: row.get(2)?,
-                manifest,
-            })
+        let rows = stmt.query_map(params![name], Self::repo_package_from_row)?;
+        let mut packages = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        sort_repo_package_records(&mut packages);
+        Ok(packages)
+    }
+
+    pub fn repo_package_for_manifest(
+        &self,
+        manifest: &PackageManifest,
+    ) -> Result<Option<RepoPackageRecord>> {
+        let conn = self.connect()?;
+        let manifest_toml = manifest.to_toml()?;
+        let mut stmt = conn.prepare(
+            "SELECT source_url, manifest_path, payload_root, manifest_toml
+             FROM repo_packages
+             WHERE name = ?1 AND version = ?2 AND revision = ?3 AND manifest_toml = ?4
+             LIMIT 1",
+        )?;
+        stmt.query_row(
+            params![
+                manifest.package.name.as_str(),
+                manifest.package.version.as_str(),
+                manifest.package.revision,
+                manifest_toml,
+            ],
+            Self::repo_package_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    fn repo_package_from_row(row: &Row<'_>) -> rusqlite::Result<RepoPackageRecord> {
+        let manifest_toml: String = row.get(3)?;
+        let manifest: PackageManifest = toml::from_str(&manifest_toml).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
         })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        Ok(RepoPackageRecord {
+            source_url: row.get(0)?,
+            manifest_path: row.get(1)?,
+            payload_root: row.get(2)?,
+            manifest,
+        })
     }
 
     pub fn current_generation_id(&self) -> Result<Option<i64>> {
@@ -513,6 +500,14 @@ impl IrisDb {
         let conn = self.connect()?;
         let tx = conn.unchecked_transaction()?;
         Self::set_current_generation_tx(&tx, id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn clear_current_generation(&self) -> Result<()> {
+        let conn = self.connect()?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("UPDATE generations SET is_current = 0", [])?;
         tx.commit()?;
         Ok(())
     }
@@ -720,6 +715,28 @@ impl IrisDb {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    pub fn replace_installed_packages(&self, records: &[InstalledPackageRecord]) -> Result<()> {
+        let conn = self.connect()?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM installed_packages", [])?;
+        for record in records {
+            tx.execute(
+                "INSERT INTO installed_packages(name, version, revision, state, generation_id, manifest_toml)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    record.manifest.package.name.as_str(),
+                    record.manifest.package.version.as_str(),
+                    record.manifest.package.revision,
+                    record.state.as_str(),
+                    record.generation_id,
+                    record.manifest.to_toml()?
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn replace_orphans(&self, package_name: &str, entries: &[OrphanRecord]) -> Result<()> {
@@ -930,6 +947,68 @@ impl IrisDb {
     }
 }
 
+fn sort_repo_package_records(records: &mut [RepoPackageRecord]) {
+    records.sort_by(compare_repo_package_records);
+}
+
+fn compare_repo_package_records(left: &RepoPackageRecord, right: &RepoPackageRecord) -> Ordering {
+    left.manifest
+        .package
+        .name
+        .cmp(&right.manifest.package.name)
+        .then_with(|| {
+            compare_repo_versions(
+                &left.manifest.package.version,
+                &right.manifest.package.version,
+            )
+        })
+        .then_with(|| {
+            right
+                .manifest
+                .package
+                .revision
+                .cmp(&left.manifest.package.revision)
+        })
+        .then_with(|| left.source_url.cmp(&right.source_url))
+        .then_with(|| left.manifest_path.cmp(&right.manifest_path))
+}
+
+fn compare_repo_versions(left: &str, right: &str) -> Ordering {
+    // Try to parse as SemVer (handle optional leading "v")
+    let left_trimmed = left.strip_prefix('v').unwrap_or(left);
+    let right_trimmed = right.strip_prefix('v').unwrap_or(right);
+
+    match (
+        semver::Version::parse(left_trimmed),
+        semver::Version::parse(right_trimmed),
+    ) {
+        (Ok(left_ver), Ok(right_ver)) => {
+            // Both versions are valid SemVer, compare using SemVer rules
+            right_ver.cmp(&left_ver)
+        }
+        _ => {
+            // Fall back to the existing logic if either version is not valid SemVer
+            let left_parts: Vec<_> = left.split(['.', '-', '_']).map(str::trim).collect();
+            let right_parts: Vec<_> = right.split(['.', '-', '_']).map(str::trim).collect();
+            let len = left_parts.len().max(right_parts.len());
+
+            for idx in 0..len {
+                let left_part = left_parts.get(idx).copied().unwrap_or("0");
+                let right_part = right_parts.get(idx).copied().unwrap_or("0");
+                let ordering = match (left_part.parse::<u64>(), right_part.parse::<u64>()) {
+                    (Ok(left_num), Ok(right_num)) => left_num.cmp(&right_num),
+                    _ => left_part.cmp(right_part),
+                };
+                if !ordering.is_eq() {
+                    return ordering;
+                }
+            }
+
+            Ordering::Equal
+        }
+    }
+}
+
 fn current_schema_version(conn: &Connection) -> Result<u32> {
     let version = conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
     u32::try_from(version).map_err(|_| {
@@ -999,6 +1078,36 @@ mod tests {
         ] {
             let mode = fs::metadata(path)?.permissions().mode() & 0o777;
             assert_eq!(mode, 0o700);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_preserves_existing_sensitive_directory_permissions() -> Result<()> {
+        let root = tempdir()?;
+        let layout = StateLayout::new(root.path());
+
+        for path in [
+            layout.bootstrap_dir(),
+            layout.run_dir(),
+            layout.tmp_dir(),
+            layout.log_dir(),
+        ] {
+            fs::create_dir_all(&path)?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        }
+
+        layout.ensure()?;
+
+        for path in [
+            layout.bootstrap_dir(),
+            layout.run_dir(),
+            layout.tmp_dir(),
+            layout.log_dir(),
+        ] {
+            let mode = fs::metadata(path)?.permissions().mode() & 0o777;
+            assert_eq!(mode, 0o755);
         }
 
         Ok(())

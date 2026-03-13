@@ -585,7 +585,15 @@ fn open_lock_file(lock_path: &Path, expected_uid: u32) -> Result<File> {
         .read(true)
         .write(true)
         .truncate(false)
-        .open(lock_path)?;
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(lock_path)
+        .map_err(|err| match err.raw_os_error() {
+            Some(libc::ELOOP) => IrisError::InvalidInput(format!(
+                "refusing to use symlinked daemon lock path: {}",
+                lock_path.display()
+            )),
+            _ => err.into(),
+        })?;
     fs::set_permissions(lock_path, fs::Permissions::from_mode(0o600))?;
     Ok(file)
 }

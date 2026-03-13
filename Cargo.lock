@@ -494,6 +494,7 @@ dependencies = [
  "ed25519-dalek",
  "libc",
  "rusqlite",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",

@@ -38,7 +38,7 @@
 
 - socket は state root 配下の `run/irisd.sock` に配置する
 - `run` directory は owner-only を前提とする
-- `log` / `tmp` directory も owner-only を前提とし、state layout 作成時点から private permission に正規化する
+- `log` / `tmp` directory も owner-only を前提とし、新規作成時は private permission で作成する
 - `run/irisd.lock` には advisory lock を取り、kernel が保持する lock により single-instance を強制する
 - lock file は残存しうるが、ファイル存在そのものではなく lock 保持の有無で live daemon を判定する
 - 既存 socket の再利用はせず、stale socket のみを安全に unlink する
@@ -123,7 +123,7 @@ status には最低限、以下が入る。
 - `--transport daemon` を使う場合も意味論は同一で、単に request 経路だけが変わる
 - log 読み出しは件数と bytes を bounded に扱い、巨大ログの丸ごと返却はしない
 - status / log 読み出しは symlink を追従せず、可能な限り no-follow open と open 後 metadata 検証で扱う
-- parent directory / opened file の owner / permission / file type が信頼できない場合は fail-closed で拒否する
+- parent directory / opened file の owner / permission / file type が信頼できない場合は自動修復せず fail-closed で拒否する
 - status / log が未生成の環境では、「まだ記録がない」ことを成功応答として返す
 
 ## 運用設定
