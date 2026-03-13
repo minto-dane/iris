@@ -612,6 +612,13 @@ fn repo_queries_and_update_use_semantic_version_ordering() -> Result<()> {
     )?;
     app.repo_sync()?;
 
+    // Verify repo_sync() doesn't mutate installed state
+    let installed_after_sync = app
+        .db
+        .installed_package("hello")?
+        .expect("hello should still be installed");
+    assert_eq!(installed_after_sync.manifest.package.version, "1.9.0");
+
     let latest = app
         .db
         .latest_repo_package("hello")?
@@ -1810,6 +1817,10 @@ fn generation_switch_and_rollback_reconcile_installed_state() -> Result<()> {
     assert_eq!(rolled_back.manifest.package.version, "1.0.0");
     assert_eq!(rolled_back.generation_id, Some(generation_v1));
 
+    // Validate DB's current generation pointer after rollback
+    let current_gen_after_rollback = app.db.current_generation_id()?;
+    assert_eq!(current_gen_after_rollback, Some(generation_v1));
+
     app.generation_switch(generation_v2)?;
     let switched = app
         .db
@@ -1817,6 +1828,10 @@ fn generation_switch_and_rollback_reconcile_installed_state() -> Result<()> {
         .expect("hello installed after switch");
     assert_eq!(switched.manifest.package.version, "2.0.0");
     assert_eq!(switched.generation_id, Some(generation_v2));
+
+    // Validate DB's current generation pointer after switch
+    let current_gen_after_switch = app.db.current_generation_id()?;
+    assert_eq!(current_gen_after_switch, Some(generation_v2));
     Ok(())
 }
 

@@ -104,6 +104,27 @@ pub(crate) fn validate_payload_snapshot(
 
     for file in &manifest.files {
         let source = payload_root.join(&file.path);
+
+        // Validate intermediate directories for symlinks
+        let mut ancestor = payload_root.to_path_buf();
+        for component in file.path.components() {
+            ancestor = ancestor.join(component);
+            if ancestor == source {
+                break;
+            }
+            let ancestor_metadata = match fs::symlink_metadata(&ancestor) {
+                Ok(metadata) => metadata,
+                Err(_) => continue, // Intermediate directories may not exist yet
+            };
+            if ancestor_metadata.file_type().is_symlink() {
+                return Err(IrisError::InvalidInput(format!(
+                    "refusing to use repository payload with symlink in path for package {}: {}",
+                    manifest.package.name,
+                    ancestor.display()
+                )));
+            }
+        }
+
         let metadata = match fs::symlink_metadata(&source) {
             Ok(metadata) => metadata,
             Err(err) if err.kind() == io::ErrorKind::NotFound => {

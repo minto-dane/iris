@@ -102,7 +102,7 @@ fn validate_package_version(value: &str) -> Result<()> {
     validate_package_field(
         value,
         "package.version",
-        false,
+        true,
         |ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '+'),
         "ASCII alphanumeric characters, '.', '-' and '+'",
     )

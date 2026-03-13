@@ -958,8 +958,8 @@ fn compare_repo_package_records(left: &RepoPackageRecord, right: &RepoPackageRec
         .cmp(&right.manifest.package.name)
         .then_with(|| {
             compare_repo_versions(
-                &right.manifest.package.version,
                 &left.manifest.package.version,
+                &right.manifest.package.version,
             )
         })
         .then_with(|| {
@@ -974,23 +974,39 @@ fn compare_repo_package_records(left: &RepoPackageRecord, right: &RepoPackageRec
 }
 
 fn compare_repo_versions(left: &str, right: &str) -> Ordering {
-    let left_parts: Vec<_> = left.split(['.', '-', '_']).map(str::trim).collect();
-    let right_parts: Vec<_> = right.split(['.', '-', '_']).map(str::trim).collect();
-    let len = left_parts.len().max(right_parts.len());
+    // Try to parse as SemVer (handle optional leading "v")
+    let left_trimmed = left.strip_prefix('v').unwrap_or(left);
+    let right_trimmed = right.strip_prefix('v').unwrap_or(right);
 
-    for idx in 0..len {
-        let left_part = left_parts.get(idx).copied().unwrap_or("0");
-        let right_part = right_parts.get(idx).copied().unwrap_or("0");
-        let ordering = match (left_part.parse::<u64>(), right_part.parse::<u64>()) {
-            (Ok(left_num), Ok(right_num)) => left_num.cmp(&right_num),
-            _ => left_part.cmp(right_part),
-        };
-        if !ordering.is_eq() {
-            return ordering;
+    match (
+        semver::Version::parse(left_trimmed),
+        semver::Version::parse(right_trimmed),
+    ) {
+        (Ok(left_ver), Ok(right_ver)) => {
+            // Both versions are valid SemVer, compare using SemVer rules
+            right_ver.cmp(&left_ver)
+        }
+        _ => {
+            // Fall back to the existing logic if either version is not valid SemVer
+            let left_parts: Vec<_> = left.split(['.', '-', '_']).map(str::trim).collect();
+            let right_parts: Vec<_> = right.split(['.', '-', '_']).map(str::trim).collect();
+            let len = left_parts.len().max(right_parts.len());
+
+            for idx in 0..len {
+                let left_part = left_parts.get(idx).copied().unwrap_or("0");
+                let right_part = right_parts.get(idx).copied().unwrap_or("0");
+                let ordering = match (left_part.parse::<u64>(), right_part.parse::<u64>()) {
+                    (Ok(left_num), Ok(right_num)) => left_num.cmp(&right_num),
+                    _ => left_part.cmp(right_part),
+                };
+                if !ordering.is_eq() {
+                    return ordering;
+                }
+            }
+
+            Ordering::Equal
         }
     }
-
-    Ordering::Equal
 }
 
 fn current_schema_version(conn: &Connection) -> Result<u32> {

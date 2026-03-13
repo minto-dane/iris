@@ -17,8 +17,8 @@
 
 識別子規則:
 
-- `name` は ASCII 英数字、`-`、`_` のみを含んでよい MUST。path separator (`/`, `\`)、whitespace、control character、`..` を含んではならない MUST NOT。
-- `version` は ASCII 英数字、`.`, `-`, `+` のみを含んでよい MUST。path separator (`/`, `\`)、whitespace、control character を含んではならない MUST NOT。
+- `name` は ASCII 英数字、`-`、`_` のみを含んでよい MUST。`name` は空文字列であってはならない MUST NOT。path separator (`/`, `\`)、whitespace、control character、`..` を含んではならない MUST NOT。
+- `version` は ASCII 英数字、`.`, `-`, `+` のみを含んでよい MUST。`version` は空文字列であってはならない MUST NOT。path separator (`/`, `\`)、whitespace、control character を含んではならない MUST NOT。
 
 任意フィールド:
 
